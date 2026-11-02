@@ -106,6 +106,8 @@ def cmd_validate(args) -> int:
     names = list(STRATEGIES) if args.strategy == ["all"] else args.strategy
     for name in names:
         _check_strategy(name)
+    if args.folds < 2:
+        raise SystemExit("--folds deve ser >= 2")
     ppy = _ppy(args.interval)
     criteria = Criteria(
         min_oos_sharpe=args.min_sharpe,
@@ -160,10 +162,20 @@ def cmd_signal(args) -> int:
 
 
 def _required_params(text: str | None, strategy) -> dict:
+    grid = ", ".join(f"{k} (ex.: {v})" for k, v in strategy.grid.items())
     if not text:
-        grid = ", ".join(f"{k} (ex.: {v})" for k, v in strategy.grid.items())
         raise SystemExit(f"Informe --params para {strategy.name}. Parâmetros: {grid}")
-    return _parse_params(text)
+    params = _parse_params(text)
+    missing = set(strategy.grid) - set(params)
+    extra = set(params) - set(strategy.grid)
+    if missing or extra:
+        raise SystemExit(
+            f"Parâmetros inválidos para {strategy.name}: faltando {sorted(missing) or '-'}, "
+            f"desconhecidos {sorted(extra) or '-'}. Parâmetros: {grid}"
+        )
+    if not strategy.valid(params):
+        raise SystemExit(f"Combinação inválida para {strategy.name}: {params}")
+    return params
 
 
 def _print_metrics(m: dict) -> None:
@@ -227,4 +239,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (OSError, ValueError) as exc:  # arquivo ausente, CSV inválido, etc.
+        print(f"Erro: {exc}", file=sys.stderr)
+        return 1

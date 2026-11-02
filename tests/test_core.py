@@ -65,6 +65,49 @@ class BacktestMechanics(unittest.TestCase):
         self.assertLess(paid, free)
 
 
+class HandCheckedStrategies(unittest.TestCase):
+    def test_donchian_enters_on_breakout_and_exits_on_breakdown(self):
+        closes = [10, 10, 10, 12, 12, 9, 9]
+        # entry=2: rompe a máxima das 2 barras anteriores (10) em i=3 (12 > 10)
+        # exit=2: quebra a mínima das 2 anteriores (10) em i=5 (9 < 10)
+        candles = flat_candles(closes)
+        sig = STRATEGIES["donchian"].signals(candles, {"entry": 2, "exit": 2})
+        self.assertEqual(sig, [0, 0, 0, 1, 1, 0, 0])
+
+    def test_rsi_reversion_hysteresis(self):
+        # período 2: queda forte (RSI baixo) -> compra; subida forte -> venda
+        closes = [10, 9, 8, 7, 8, 9, 10, 11, 12]
+        sig = STRATEGIES["rsi_reversion"].signals(
+            flat_candles(closes), {"period": 2, "buy_below": 20, "sell_above": 80}
+        )
+        # RSI (Wilder, n=2): i=2 -> 0 (compra); i=4 -> 50; i=5 -> 75; i=6 -> 87.5 (venda)
+        self.assertEqual(sig, [0, 0, 1, 1, 1, 1, 0, 0, 0])
+
+    def test_sma_cross_signal(self):
+        closes = [1, 1, 1, 2, 3]
+        sig = STRATEGIES["sma_cross"].signals(flat_candles(closes), {"fast": 1, "slow": 2})
+        # sma1 > sma2 a partir de i=3 (2 > 1.5)
+        self.assertEqual(sig, [0, 0, 0, 1, 1])
+
+
+class FeeAccounting(unittest.TestCase):
+    def test_round_trip_on_flat_prices_loses_two_fees(self):
+        candles = flat_candles([100, 100, 100, 100])
+        res = run_backtest(candles, [0, 1, 1, 0], Costs(fee=0.01, slippage=0.0), initial_cash=1000.0)
+        # compra: qty = 1000 / (100 * 1.01); venda: 100 * qty * 0.99 = 1000 * 0.99 / 1.01
+        expected = 1000.0 * 0.99 / 1.01
+        self.assertAlmostEqual(res.equity[-1], expected, places=6)
+        self.assertEqual(len(res.trades), 1)
+        self.assertAlmostEqual(res.trades[0].return_pct, 0.99 / 1.01 - 1, places=6)
+
+    def test_no_trades_keeps_capital(self):
+        candles = flat_candles([100, 120, 90])
+        res = run_backtest(candles, [0, 0, 0], Costs(0.01, 0.01), initial_cash=1000.0)
+        self.assertEqual(res.equity, [1000.0] * 4)
+        self.assertEqual(res.metrics["trades"], 0)
+        self.assertEqual(res.metrics["exposure"], 0)
+
+
 class NoLookahead(unittest.TestCase):
     def test_signals_are_causal(self):
         candles = synthetic_candles(400, seed=11)
@@ -135,6 +178,28 @@ class DataIO(unittest.TestCase):
             path.write_text("timestamp,open,high,low,close,volume\n1,10,9,8,10,1\n")
             with self.assertRaises(ValueError):
                 load_csv(path)
+
+
+class CliErrors(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.data = str(Path(self._tmp.name) / "s.csv")
+        main(["synth", "--n", "300", "--out", self.data])
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_missing_or_wrong_params_exit_cleanly(self):
+        for params in (None, "entry=20", "entry=20,exit=10,foo=1", "entry=10,exit=20"):
+            argv = ["backtest", "--data", self.data, "--strategy", "donchian"]
+            if params:
+                argv += ["--params", params]
+            with self.assertRaises(SystemExit):
+                main(argv)
+
+    def test_folds_below_two_exit_cleanly(self):
+        with self.assertRaises(SystemExit):
+            main(["validate", "--data", self.data, "--folds", "1"])
 
 
 class Cli(unittest.TestCase):
